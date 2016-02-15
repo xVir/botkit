@@ -71,6 +71,14 @@ if (!process.env.token) {
 
 var Botkit = require('./lib/Botkit.js');
 var os = require('os');
+var apiai = require('apiai');
+var uuid = require('node-uuid');
+var Entities = require('html-entities').XmlEntities;
+var decoder = new Entities();
+
+var apiAiService = apiai('bb3039d2907b4e238bc82c63b7bebbb2','6b5639dd-ffb8-4e21-8519-a2594dafc70e');
+
+var sessionIds = {};
 
 var controller = Botkit.slackbot({
     debug: false,
@@ -85,201 +93,74 @@ var bot = controller.spawn({
     }
 });
 
-
-
-// Example receive middleware.
-// Console.log's every message that gets received.
+// Example receive middleware with API.AI processing
 controller.middleware.receive.use(function(bot, message, next) {
 
     console.log('Receive middleware! ', message.type, 'for ', bot.identity.name);
-    next();
 
+    if (message.type == 'message' && message.text)
+    {
+        if (message.user == bot.identity.id) {
+            // message from bot can be skipped
+            next();
+        }
+        else if (message.text.indexOf("<@U") == 0) {
+            // skip other users direct mentions
+            next();
+        }
+        else {
+            var requestText = decoder.decode(message.text);
 
-});
+            var channel = message.channel;
+            if (!(channel in sessionIds)) {
+                sessionIds[channel] = uuid.v1();
+            }
 
-// Example hears middleware.
-// Look for {intent: 'name_of_intent'} and match the message.intent field
-// instead of doing a regular expression match on the text
-controller.middleware.hears.use(function(bot, message, triggers, next) {
+            var request = apiAiService.textRequest(requestText,
+                {
+                    sessionId: sessionIds[channel]
+                });
 
-    console.log('Hears middleware!');
+            request.on('response', function (response) {
+                console.log('api.ai response', JSON.stringify(response));
 
-    if (!message.heard) {
-        for (var t = 0; t < triggers.length; t++) {
-            var trigger = triggers[t];
-            if (typeof(trigger.pattern) == 'object' && trigger.pattern.intent) {
-                if (message.intent) {
-                    if (message.intent === trigger.pattern.intent) {
-                        message.heard = true;
-                        trigger.callback.apply(controller, [bot, message]);
-                        break;
+                if (response.result) {
+                    if (response.result.fulfillment) {
+                        message.apiaiSpeech = response.result.fulfillment.speech;
+                    }
+
+                    if (response.result.action) {
+                        message.apiaiAction = response.result.action;
                     }
                 }
-            }
+
+                next();
+            });
+
+            request.on('error', function (error) {
+                console.log(error);
+                next();
+            });
+
+            request.end();
         }
     }
-    next();
-
-});
-
-
-// Example receive middleware.
-// Looks for the phrase "hi" or "hello" and adds a message.intent field
-controller.middleware.receive.use(function(bot, message, next) {
-
-    console.log('Receive middleware!');
-
-    if (message.text &&
-        (message.text == 'hi' || message.text == 'hello')
-    ) {
-        message.intent = 'hi';
-    }
-    next();
-
-});
-
-// Example send middleware
-// Looks for message.intent, and translates it into a real message
-controller.middleware.send.use(function(bot, message, next) {
-
-    console.log('Send middleware!');
-
-    if (message.intent) {
-        if (message.intent == 'hi') {
-            message.text = 'OH HELLOOOOOOO';
-        }
-    }
-    next();
-
-});
-
-controller.middleware.pre_api.use(function(command, options, cb, next) {
-
-    console.log("PRE API: " + command);
-    next();
-
-});
-
-controller.middleware.post_api.use(function(command, options, cb, json, next) {
-
-    console.log("POST API: ", json);
-    next();
-
-});
-
-
-//controller.hears(['hello', 'hi'], 'direct_message,direct_mention,mention', function(bot, message) {
-controller.hears([{intent: 'hi'}], 'direct_message,direct_mention,mention', function(bot, message) {
-
-    bot.api.reactions.add({
-        timestamp: message.ts,
-        channel: message.channel,
-        name: 'robot_face',
-    }, function(err, res) {
-        if (err) {
-            bot.botkit.log('Failed to add emoji reaction :(', err);
-        }
-    });
-
-
-    controller.storage.users.get(message.user, function(err, user) {
-        if (user && user.name) {
-            bot.reply(message, 'Hello ' + user.name + '!!');
-        } else {
-            bot.reply(message, {intent: 'hi'});
-        }
-    });
-});
-
-controller.hears(['call me (.*)'], 'direct_message,direct_mention,mention', function(bot, message) {
-    var matches = message.text.match(/call me (.*)/i);
-    var name = matches[1];
-    controller.storage.users.get(message.user, function(err, user) {
-        if (!user) {
-            user = {
-                id: message.user,
-            };
-        }
-        user.name = name;
-        controller.storage.users.save(user, function(err, id) {
-            bot.reply(message, 'Got it. I will call you ' + user.name + ' from now on.');
-        });
-    });
-});
-
-controller.hears(['what is my name', 'who am i'], 'direct_message,direct_mention,mention', function(bot, message) {
-
-    controller.storage.users.get(message.user, function(err, user) {
-        if (user && user.name) {
-            bot.reply(message, 'Your name is ' + user.name);
-        } else {
-            bot.reply(message, 'I don\'t know yet!');
-        }
-    });
-});
-
-
-controller.hears(['shutdown'], 'direct_message,direct_mention,mention', function(bot, message) {
-
-    bot.startConversation(message, function(err, convo) {
-        convo.ask('Are you sure you want me to shutdown?', [
-            {
-                pattern: bot.utterances.yes,
-                callback: function(response, convo) {
-                    convo.say('Bye!');
-                    convo.next();
-                    setTimeout(function() {
-                        process.exit();
-                    }, 3000);
-                }
-            },
-        {
-            pattern: bot.utterances.no,
-            default: true,
-            callback: function(response, convo) {
-                convo.say('*Phew!*');
-                convo.next();
-            }
-        }
-        ]);
-    });
-});
-
-
-controller.hears(['uptime', 'identify yourself', 'who are you', 'what is your name'],
-    'direct_message,direct_mention,mention',
-    function(bot, message) {
-
-        var hostname = os.hostname();
-        var uptime = formatUptime(process.uptime());
-
-        bot.reply(message, ':robot_face: I am a bot named <@' +
-            bot.identity.name + '>. I have been running for ' +
-            uptime + ' on ' + hostname + '.');
-
-    }
-);
-
-// controller.on(['direct_message', 'direct_mention'], function(bot, message) {
-//     if (!message.heard) {
-//         bot.reply(message, ':robot_face:?');
-//     }
-// });
-
-function formatUptime(uptime) {
-    var unit = 'second';
-    if (uptime > 60) {
-        uptime = uptime / 60;
-        unit = 'minute';
-    }
-    if (uptime > 60) {
-        uptime = uptime / 60;
-        unit = 'hour';
-    }
-    if (uptime != 1) {
-        unit = unit + 's';
+    else
+    {
+        next();
     }
 
-    uptime = uptime + ' ' + unit;
-    return uptime;
-}
+});
+
+controller.hears(['.*'], ['direct_message', 'direct_mention', 'mention', 'ambient'], function (bot, message) {
+    if (message.type == 'message') {
+
+        console.log('Api.ai result ', message.apiaiSpeech, ' ' , message.apiaiAction);
+
+        if (message.apiaiSpeech) {
+            bot.reply(message, message.apiaiSpeech);
+        }
+
+    }
+
+});
